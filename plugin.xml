@@ -1,4 +1,4 @@
-<library path="src">
+<library path="rqt_joint_trajectory_plot">
   <class name="JointTrajectoryPlot" type="rqt_joint_trajectory_plot.plugin.JointTrajectoryPlot" base_class_type="rqt_gui_py::Plugin">
     <description>
       A plugin visualizing the JointTrajectory message in 2D plot.

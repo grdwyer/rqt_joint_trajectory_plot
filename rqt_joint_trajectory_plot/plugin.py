@@ -9,7 +9,7 @@ class JointTrajectoryPlot(Plugin):
         self.context = context
         self.setObjectName('JointTrajctoryPlot')
         # Create a MainWidget
-        self.main_widget = MainWidget()
+        self.main_widget = MainWidget(context.node)
         context.add_widget(self.main_widget)
 
     def save_settings(self, plugin_settings, instance_settings):

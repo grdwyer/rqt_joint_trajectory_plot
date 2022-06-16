@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 
+import os
+from ament_index_python.packages import get_package_share_directory
 from python_qt_binding import loadUi
 from python_qt_binding.QtCore import Qt, QTimer, qWarning, Signal, Slot
 from python_qt_binding.QtGui import QIcon
 from python_qt_binding.QtWidgets import QAction, QMenu, QWidget, QTreeWidgetItem
-import rospy
-import rospkg
-import roslib
-from roslib.message import get_message_class
+import rclpy
+import rclpy.node
+from rclpy.duration import Duration
 from rqt_py_common import topic_helpers
+from rqt_py_common.message_helpers import get_message_class
 from trajectory_msgs.msg import JointTrajectory
-from control_msgs.msg import FollowJointTrajectoryActionGoal
+# from control_msgs.msg import FollowJointTrajectoryActionGoal
 from moveit_msgs.msg import DisplayTrajectory
 import numpy as np
 from .plot_widget import PlotWidget
@@ -19,13 +21,12 @@ from .plot_widget import PlotWidget
 class MainWidget(QWidget):
     draw_curves = Signal(object, object)
 
-    def __init__(self):
+    def __init__(self, node: rclpy.node.Node):
         super(MainWidget, self).__init__()
         self.setObjectName('MainWidget')
-
-        rospack = rospkg.RosPack()
-        ui_file = rospack.get_path(
-            'rqt_joint_trajectory_plot') + '/resource/JointTrajectoryPlot.ui'
+        self.node = node
+        ui_file = os.path.join(get_package_share_directory('rqt_joint_trajectory_plot'), 'resource',
+                               'JointTrajectoryPlot.ui')
         loadUi(ui_file, self)
 
         self.refresh_button.setIcon(QIcon.fromTheme('view-refresh'))
@@ -55,16 +56,18 @@ class MainWidget(QWidget):
         '''
         Refresh topic list in the combobox
         '''
-        topic_list = rospy.get_published_topics()
+        topic_list = self.node.get_topic_names_and_types()
         if topic_list is None:
             return
         self.topic_combox.clear()
         self.topic_name_class_map = {}
         for (name, type) in topic_list:
-            if type in [ 'trajectory_msgs/JointTrajectory',
-                         'control_msgs/FollowJointTrajectoryActionGoal',
-                         'moveit_msgs/DisplayTrajectory']:
-                self.topic_name_class_map[name] = get_message_class(type)
+            self.node.get_logger().info("Found topic: {} with type: {}".format(name, type))
+            if type[0] in [ 'trajectory_msgs/msg/JointTrajectory',
+                         # 'control_msgs/FollowJointTrajectoryActionGoal',
+                         'moveit_msgs/msg/DisplayTrajectory']:
+                self.node.get_logger().info("\nadding topic: {} with type: {}".format(name, type[0]))
+                self.topic_name_class_map[name] = get_message_class(type[0])
                 self.topic_combox.addItem(name)
 
     def change_topic(self):
@@ -72,17 +75,18 @@ class MainWidget(QWidget):
         if not topic_name:
             return
         if self.handler:
-            self.handler.unregister()
+            self.node.destroy_subscription(self.handler)
         self.joint_names = []
-        self.handler = rospy.Subscriber(
-            topic_name, rospy.AnyMsg, self.callback, topic_name)
+        self.handler = self.node.create_subscription(
+            self.topic_name_class_map[topic_name], topic_name, self.callback, 10)
 
     def close(self):
         if self.handler:
-            self.handler.unregister()
+            self.node.destroy_subscription(self.handler)
             self.handler = None
 
     def refresh_tree(self):
+        self.node.get_logger().info("Refreshing the tree for {}".format(self.joint_names))
         self.select_tree.itemChanged.disconnect()
         self.select_tree.clear()
         for joint_name in self.joint_names:
@@ -97,26 +101,33 @@ class MainWidget(QWidget):
                 sub_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
         self.select_tree.itemChanged.connect(self.update_checkbox)
 
-    def callback(self, anymsg, topic_name):
+    def callback(self, anymsg):
         if self.pause_button.isChecked():
             return
+
+        msg_class = self.topic_name_class_map[self.handler.topic_name]
+        self.node.get_logger().info("Received trajectory from {} with type {}".format(self.handler.topic_name, msg_class))
         # In case of control_msgs/FollowJointTrajectoryActionGoal
         # set trajectory_msgs/JointTrajectory to 'msg'
         # Convert AnyMsg to trajectory_msgs/JointTrajectory
-        msg_class = self.topic_name_class_map[topic_name]
-        if msg_class == JointTrajectory:
-            msg = JointTrajectory().deserialize(anymsg._buff)
-        elif msg_class == FollowJointTrajectoryActionGoal:
-            msg = FollowJointTrajectoryActionGoal().deserialize(anymsg._buff).goal.trajectory
-        elif msg_class == DisplayTrajectory:
-            if DisplayTrajectory().deserialize(anymsg._buff).trajectory.__len__() > 0:
-                msg = DisplayTrajectory().deserialize(anymsg._buff).trajectory.pop().joint_trajectory
+
+        if isinstance(anymsg, JointTrajectory):
+            msg = anymsg
+        # elif msg_class == FollowJointTrajectoryActionGoal:
+        #     msg = FollowJointTrajectoryActionGoal().deserialize(anymsg._buff).goal.trajectory
+        elif isinstance(anymsg, DisplayTrajectory):
+            if anymsg.trajectory.__len__() > 0:
+                msg = anymsg.trajectory.pop().joint_trajectory
             else:
-                rospy.logwarn("Received planned trajectory has no waypoints in it. Nothing to plot!")
+                self.node.get_logger().warn("Received planned trajectory has no waypoints in it. Nothing to plot!")
                 return
         else:
-            rospy.logerr('Wrong message type %s'%msg_class)
+            self.node.get_logger().error('Wrong message type {}'.format(msg_class))
             return
+
+        self.node.get_logger().info("Got joint trajectory with {} points and a duration of {}".format(len(msg.points),
+                                                                                             Duration.from_msg(msg.points[-1].time_from_start).nanoseconds/1e9))
+
         self.time = np.array([0.0] * len(msg.points))
         (self.dis, self.vel, self.acc, self.eff) = ({}, {}, {}, {})
         for joint_name in msg.joint_names:
@@ -126,7 +137,7 @@ class MainWidget(QWidget):
             self.eff[joint_name] = np.array([0.0] * len(msg.points))
         for i in range(len(msg.points)):
             point = msg.points[i]
-            self.time[i] = point.time_from_start.to_sec()
+            self.time[i] = Duration.from_msg(point.time_from_start).nanoseconds/1e9
             for j in range(len(msg.joint_names)):
                 joint_name = msg.joint_names[j]
                 if point.positions:

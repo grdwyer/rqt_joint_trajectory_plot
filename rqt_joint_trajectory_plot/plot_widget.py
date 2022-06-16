@@ -9,7 +9,7 @@ import operator
 import numpy as np
 import copy
 import threading
-import rospy
+import rclpy
 from trajectory_msgs.msg import JointTrajectory
 if LooseVersion(QT_BINDING_VERSION) >= LooseVersion('5.0.0'):
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
